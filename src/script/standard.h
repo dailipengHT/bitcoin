@@ -9,10 +9,8 @@
 #include <script/interpreter.h>
 #include <uint256.h>
 
-#include <boost/variant.hpp>
-
 #include <string>
-
+#include <variant>
 
 static const bool DEFAULT_ACCEPT_DATACARRIER = true;
 
@@ -28,7 +26,7 @@ protected:
 
 public:
     BaseHash() : m_hash() {}
-    BaseHash(const HashType& in) : m_hash(in) {}
+    explicit BaseHash(const HashType& in) : m_hash(in) {}
 
     unsigned char* begin()
     {
@@ -129,6 +127,7 @@ enum class TxoutType {
     NULL_DATA, //!< unspendable OP_RETURN script that carries data
     WITNESS_V0_SCRIPTHASH,
     WITNESS_V0_KEYHASH,
+    WITNESS_V1_TAPROOT,
     WITNESS_UNKNOWN, //!< Only for Witness versions not already defined above
 };
 
@@ -206,10 +205,11 @@ struct WitnessUnknown
  *  * ScriptHash: TxoutType::SCRIPTHASH destination (P2SH)
  *  * WitnessV0ScriptHash: TxoutType::WITNESS_V0_SCRIPTHASH destination (P2WSH)
  *  * WitnessV0KeyHash: TxoutType::WITNESS_V0_KEYHASH destination (P2WPKH)
- *  * WitnessUnknown: TxoutType::WITNESS_UNKNOWN destination (P2W???)
+ *  * WitnessUnknown: TxoutType::WITNESS_UNKNOWN/WITNESS_V1_TAPROOT destination (P2W???)
+ *    (taproot outputs do not require their own type as long as no wallet support exists)
  *  A CTxDestination is the internal data type encoded in a bitcoin address
  */
-typedef boost::variant<CNoDestination, PKHash, ScriptHash, WitnessV0ScriptHash, WitnessV0KeyHash, WitnessUnknown> CTxDestination;
+using CTxDestination = std::variant<CNoDestination, PKHash, ScriptHash, WitnessV0ScriptHash, WitnessV0KeyHash, WitnessUnknown>;
 
 /** Check whether a CTxDestination is a CNoDestination. */
 bool IsValidDestination(const CTxDestination& dest);
@@ -247,6 +247,8 @@ bool ExtractDestination(const CScript& scriptPubKey, CTxDestination& addressRet)
  * Note: this function confuses destinations (a subset of CScripts that are
  * encodable as an address) with key identifiers (of keys involved in a
  * CScript), and its use should be phased out.
+ *
+ * TODO: from v23 ("addresses" and "reqSigs" deprecated) "ExtractDestinations" should be removed
  */
 bool ExtractDestinations(const CScript& scriptPubKey, TxoutType& typeRet, std::vector<CTxDestination>& addressRet, int& nRequiredRet);
 

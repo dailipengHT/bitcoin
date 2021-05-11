@@ -14,6 +14,7 @@
 #include <interfaces/handler.h>
 #include <interfaces/node.h>
 #include <util/string.h>
+#include <util/threadnames.h>
 #include <util/translation.h>
 #include <wallet/wallet.h>
 
@@ -45,6 +46,9 @@ WalletController::WalletController(ClientModel& client_model, const PlatformStyl
 
     m_activity_worker->moveToThread(m_activity_thread);
     m_activity_thread->start();
+    QTimer::singleShot(0, m_activity_worker, []() {
+        util::ThreadRename("qt-walletctrl");
+    });
 }
 
 // Not using the default destructor because not all member types definitions are
@@ -124,10 +128,20 @@ WalletModel* WalletController::getOrCreateWallet(std::unique_ptr<interfaces::Wal
     }
 
     // Instantiate model and register it.
-    WalletModel* wallet_model = new WalletModel(std::move(wallet), m_client_model, m_platform_style, nullptr);
-    // Handler callback runs in a different thread so fix wallet model thread affinity.
+    WalletModel* wallet_model = new WalletModel(std::move(wallet), m_client_model, m_platform_style,
+                                                nullptr /* required for the following moveToThread() call */);
+
+    // Move WalletModel object to the thread that created the WalletController
+    // object (GUI main thread), instead of the current thread, which could be
+    // an outside wallet thread or RPC thread sending a LoadWallet notification.
+    // This ensures queued signals sent to the WalletModel object will be
+    // handled on the GUI event loop.
     wallet_model->moveToThread(thread());
-    wallet_model->setParent(this);
+    // setParent(parent) must be called in the thread which created the parent object. More details in #18948.
+    GUIUtil::ObjectInvoke(this, [wallet_model, this] {
+        wallet_model->setParent(this);
+    }, GUIUtil::blockingGUIThreadConnection());
+
     m_wallets.push_back(wallet_model);
 
     // WalletModel::startPollBalance needs to be called in a thread managed by
@@ -138,7 +152,7 @@ WalletModel* WalletController::getOrCreateWallet(std::unique_ptr<interfaces::Wal
 
     connect(wallet_model, &WalletModel::unload, this, [this, wallet_model] {
         // Defer removeAndDeleteWallet when no modal widget is active.
-        // TODO: remove this workaround by removing usage of QDiallog::exec.
+        // TODO: remove this workaround by removing usage of QDialog::exec.
         if (QApplication::activeModalWidget()) {
             connect(qApp, &QApplication::focusWindowChanged, wallet_model, [this, wallet_model]() {
                 if (!QApplication::activeModalWidget()) {
@@ -153,7 +167,6 @@ WalletModel* WalletController::getOrCreateWallet(std::unique_ptr<interfaces::Wal
     // Re-emit coinsSent signal from wallet model.
     connect(wallet_model, &WalletModel::coinsSent, this, &WalletController::coinsSent);
 
-    // Notify walletAdded signal on the GUI thread.
     Q_EMIT walletAdded(wallet_model);
 
     return wallet_model;
@@ -234,7 +247,7 @@ void CreateWalletActivity::askPassphrase()
 
 void CreateWalletActivity::createWallet()
 {
-    showProgressDialog(tr("Creating Wallet <b>%1</b>...").arg(m_create_wallet_dialog->walletName().toHtmlEscaped()));
+    showProgressDialog(tr("Creating Wallet <b>%1</b>…").arg(m_create_wallet_dialog->walletName().toHtmlEscaped()));
 
     std::string name = m_create_wallet_dialog->walletName().toStdString();
     uint64_t flags = 0;
@@ -317,7 +330,7 @@ void OpenWalletActivity::open(const std::string& path)
 {
     QString name = path.empty() ? QString("["+tr("default wallet")+"]") : QString::fromStdString(path);
 
-    showProgressDialog(tr("Opening Wallet <b>%1</b>...").arg(name.toHtmlEscaped()));
+    showProgressDialog(tr("Opening Wallet <b>%1</b>…").arg(name.toHtmlEscaped()));
 
     QTimer::singleShot(0, worker(), [this, path] {
         std::unique_ptr<interfaces::Wallet> wallet = node().walletClient().loadWallet(path, m_error_message, m_warning_message);

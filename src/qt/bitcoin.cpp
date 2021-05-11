@@ -44,10 +44,13 @@
 
 #include <QApplication>
 #include <QDebug>
+#include <QFontDatabase>
+#include <QLatin1String>
 #include <QLibraryInfo>
 #include <QLocale>
 #include <QMessageBox>
 #include <QSettings>
+#include <QStringBuilder>
 #include <QThread>
 #include <QTimer>
 #include <QTranslator>
@@ -60,6 +63,7 @@ Q_IMPORT_PLUGIN(QXcbIntegrationPlugin);
 Q_IMPORT_PLUGIN(QWindowsIntegrationPlugin);
 #elif defined(QT_QPA_PLATFORM_COCOA)
 Q_IMPORT_PLUGIN(QCocoaIntegrationPlugin);
+Q_IMPORT_PLUGIN(QMacStylePlugin);
 #endif
 #endif
 
@@ -77,7 +81,7 @@ static void RegisterMetaTypes()
   #ifdef ENABLE_WALLET
     qRegisterMetaType<WalletModel*>();
   #endif
-    // Register typedefs (see http://qt-project.org/doc/qt-5/qmetatype.html#qRegisterMetaType)
+    // Register typedefs (see https://doc.qt.io/qt-5/qmetatype.html#qRegisterMetaType)
     // IMPORTANT: if CAmount is no longer a typedef use the normal variant above (see https://doc.qt.io/qt-5/qmetatype.html#qRegisterMetaType-1)
     qRegisterMetaType<CAmount>("CAmount");
     qRegisterMetaType<size_t>("size_t");
@@ -166,8 +170,8 @@ void BitcoinCore::initialize()
 {
     try
     {
-        qDebug() << __func__ << ": Running initialization in thread";
         util::ThreadRename("qt-init");
+        qDebug() << __func__ << ": Running initialization in thread";
         interfaces::BlockAndHeaderTipInfo tip_info;
         bool rv = m_node.appInitMain(&tip_info);
         Q_EMIT initializeResult(rv, tip_info);
@@ -263,7 +267,7 @@ void BitcoinApplication::createWindow(const NetworkStyle *networkStyle)
 void BitcoinApplication::createSplashScreen(const NetworkStyle *networkStyle)
 {
     assert(!m_splash);
-    m_splash = new SplashScreen(nullptr, networkStyle);
+    m_splash = new SplashScreen(networkStyle);
     // We don't hold a direct pointer to the splash screen after creation, but the splash
     // screen will take care of deleting itself when finish() happens.
     m_splash->show();
@@ -315,11 +319,9 @@ void BitcoinApplication::parameterSetup()
     InitParameterInteraction(gArgs);
 }
 
-void BitcoinApplication::InitializePruneSetting(bool prune)
+void BitcoinApplication::InitPruneSetting(int64_t prune_MiB)
 {
-    // If prune is set, intentionally override existing prune size with
-    // the default size since this is called when choosing a new datadir.
-    optionsModel->SetPruneTargetGB(prune ? DEFAULT_PRUNE_TARGET_GB : 0, true);
+    optionsModel->SetPruneTargetGB(PruneMiBtoGB(prune_MiB), true);
 }
 
 void BitcoinApplication::requestInitialize()
@@ -415,8 +417,21 @@ void BitcoinApplication::shutdownResult()
 
 void BitcoinApplication::handleRunawayException(const QString &message)
 {
-    QMessageBox::critical(nullptr, "Runaway exception", BitcoinGUI::tr("A fatal error occurred. %1 can no longer continue safely and will quit.").arg(PACKAGE_NAME) + QString("<br><br>") + message);
+    QMessageBox::critical(
+        nullptr, tr("Runaway exception"),
+        tr("A fatal error occurred. %1 can no longer continue safely and will quit.").arg(PACKAGE_NAME) %
+        QLatin1String("<br><br>") % GUIUtil::MakeHtmlLink(message, PACKAGE_BUGREPORT));
     ::exit(EXIT_FAILURE);
+}
+
+void BitcoinApplication::handleNonFatalException(const QString& message)
+{
+    assert(QThread::currentThread() == thread());
+    QMessageBox::warning(
+        nullptr, tr("Internal error"),
+        tr("An internal error occurred. %1 will attempt to continue safely. This is "
+           "an unexpected bug which can be reported as described below.").arg(PACKAGE_NAME) %
+        QLatin1String("<br><br>") % GUIUtil::MakeHtmlLink(message, PACKAGE_BUGREPORT));
 }
 
 WId BitcoinApplication::getMainWinId() const
@@ -462,11 +477,16 @@ int GuiMain(int argc, char* argv[])
 
     // Generate high-dpi pixmaps
     QApplication::setAttribute(Qt::AA_UseHighDpiPixmaps);
-#if QT_VERSION >= 0x050600
     QCoreApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
+
+#if defined(QT_QPA_PLATFORM_ANDROID)
+    QApplication::setAttribute(Qt::AA_DontUseNativeMenuBar);
+    QApplication::setAttribute(Qt::AA_DontCreateNativeWidgetSiblings);
+    QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
 #endif
 
     BitcoinApplication app;
+    QFontDatabase::addApplicationFont(":/fonts/monospace");
 
     /// 2. Parse command-line options. We do this after qt in order to show an error if there are problems parsing these
     // Command-line options take precedence:
@@ -505,12 +525,15 @@ int GuiMain(int argc, char* argv[])
         return EXIT_SUCCESS;
     }
 
+    // Install global event filter that makes sure that long tooltips can be word-wrapped
+    app.installEventFilter(new GUIUtil::ToolTipToRichTextFilter(TOOLTIP_WRAP_THRESHOLD, &app));
+
     /// 5. Now that settings and translations are available, ask user for data directory
     // User language is set up: pick a data directory
     bool did_show_intro = false;
-    bool prune = false; // Intro dialog prune check box
+    int64_t prune_MiB = 0;  // Intro dialog prune configuration
     // Gracefully exit if the user cancels
-    if (!Intro::showIfNeeded(did_show_intro, prune)) return EXIT_SUCCESS;
+    if (!Intro::showIfNeeded(did_show_intro, prune_MiB)) return EXIT_SUCCESS;
 
     /// 6. Determine availability of data directory and parse bitcoin.conf
     /// - Do not call GetDataDir(true) before this step finishes
@@ -533,7 +556,7 @@ int GuiMain(int argc, char* argv[])
     // - QSettings() will use the new application name after this, resulting in network-specific settings
     // - Needs to be done before createOptionsModel
 
-    // Check for -chain, -testnet or -regtest parameter (Params() calls are only valid after this clause)
+    // Check for chain settings (Params() calls are only valid after this clause)
     try {
         SelectParams(gArgs.GetChainName());
     } catch(std::exception &e) {
@@ -576,8 +599,6 @@ int GuiMain(int argc, char* argv[])
 #endif // ENABLE_WALLET
 
     /// 9. Main GUI initialization
-    // Install global event filter that makes sure that long tooltips can be word-wrapped
-    app.installEventFilter(new GUIUtil::ToolTipToRichTextFilter(TOOLTIP_WRAP_THRESHOLD, &app));
     // Install global event filter that makes sure that out-of-focus labels do not contain text cursor.
     app.installEventFilter(new GUIUtil::LabelOutOfFocusEventFilter(&app));
 #if defined(Q_OS_WIN)
@@ -594,7 +615,7 @@ int GuiMain(int argc, char* argv[])
 
     if (did_show_intro) {
         // Store intro dialog settings other than datadir (network specific)
-        app.InitializePruneSetting(prune);
+        app.InitPruneSetting(prune_MiB);
     }
 
     if (gArgs.GetBoolArg("-splash", DEFAULT_SPLASHSCREEN) && !gArgs.GetBoolArg("-min", false))
@@ -612,7 +633,7 @@ int GuiMain(int argc, char* argv[])
         if (app.baseInitialize()) {
             app.requestInitialize();
 #if defined(Q_OS_WIN)
-            WinShutdownMonitor::registerShutdownBlockReason(QObject::tr("%1 didn't yet exit safely...").arg(PACKAGE_NAME), (HWND)app.getMainWinId());
+            WinShutdownMonitor::registerShutdownBlockReason(QObject::tr("%1 didn't yet exit safely…").arg(PACKAGE_NAME), (HWND)app.getMainWinId());
 #endif
             app.exec();
             app.requestShutdown();

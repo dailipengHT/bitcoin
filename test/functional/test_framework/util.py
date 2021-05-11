@@ -8,11 +8,11 @@ from base64 import b64encode
 from binascii import unhexlify
 from decimal import Decimal, ROUND_DOWN
 from subprocess import CalledProcessError
+import hashlib
 import inspect
 import json
 import logging
 import os
-import random
 import re
 import time
 import unittest
@@ -261,6 +261,14 @@ def wait_until_helper(predicate, *, attempts=float('inf'), timeout=float('inf'),
         raise AssertionError("Predicate {} not true after {} seconds".format(predicate_source, timeout))
     raise RuntimeError('Unreachable')
 
+def sha256sum_file(filename):
+    h = hashlib.sha256()
+    with open(filename, 'rb') as f:
+        d = f.read(4096)
+        while len(d) > 0:
+            h.update(d)
+            d = f.read(4096)
+    return h.digest()
 
 # RPC/P2P connection constants and functions
 ############################################
@@ -334,16 +342,25 @@ def initialize_datadir(dirname, n, chain):
     datadir = get_datadir_path(dirname, n)
     if not os.path.isdir(datadir):
         os.makedirs(datadir)
-    # Translate chain name to config name
+    write_config(os.path.join(datadir, "bitcoin.conf"), n=n, chain=chain)
+    os.makedirs(os.path.join(datadir, 'stderr'), exist_ok=True)
+    os.makedirs(os.path.join(datadir, 'stdout'), exist_ok=True)
+    return datadir
+
+
+def write_config(config_path, *, n, chain, extra_config=""):
+    # Translate chain subdirectory name to config name
     if chain == 'testnet3':
         chain_name_conf_arg = 'testnet'
         chain_name_conf_section = 'test'
     else:
         chain_name_conf_arg = chain
         chain_name_conf_section = chain
-    with open(os.path.join(datadir, "bitcoin.conf"), 'w', encoding='utf8') as f:
-        f.write("{}=1\n".format(chain_name_conf_arg))
-        f.write("[{}]\n".format(chain_name_conf_section))
+    with open(config_path, 'w', encoding='utf8') as f:
+        if chain_name_conf_arg:
+            f.write("{}=1\n".format(chain_name_conf_arg))
+        if chain_name_conf_section:
+            f.write("[{}]\n".format(chain_name_conf_section))
         f.write("port=" + str(p2p_port(n)) + "\n")
         f.write("rpcport=" + str(rpc_port(n)) + "\n")
         f.write("fallbackfee=0.0002\n")
@@ -351,13 +368,15 @@ def initialize_datadir(dirname, n, chain):
         f.write("keypool=1\n")
         f.write("discover=0\n")
         f.write("dnsseed=0\n")
+        f.write("fixedseeds=0\n")
         f.write("listenonion=0\n")
         f.write("printtoconsole=0\n")
         f.write("upnp=0\n")
+        f.write("natpmp=0\n")
         f.write("shrinkdebugfile=0\n")
-        os.makedirs(os.path.join(datadir, 'stderr'), exist_ok=True)
-        os.makedirs(os.path.join(datadir, 'stdout'), exist_ok=True)
-    return datadir
+        # To improve SQLite wallet performance so that the tests don't timeout, use -unsafesqlitesync
+        f.write("unsafesqlitesync=1\n")
+        f.write(extra_config)
 
 
 def get_datadir_path(dirname, n):
@@ -412,47 +431,6 @@ def set_node_times(nodes, t):
         node.setmocktime(t)
 
 
-def disconnect_nodes(from_connection, node_num):
-    def get_peer_ids():
-        result = []
-        for peer in from_connection.getpeerinfo():
-            if "testnode{}".format(node_num) in peer['subver']:
-                result.append(peer['id'])
-        return result
-
-    peer_ids = get_peer_ids()
-    if not peer_ids:
-        logger.warning("disconnect_nodes: {} and {} were not connected".format(
-            from_connection.index,
-            node_num,
-        ))
-        return
-    for peer_id in peer_ids:
-        try:
-            from_connection.disconnectnode(nodeid=peer_id)
-        except JSONRPCException as e:
-            # If this node is disconnected between calculating the peer id
-            # and issuing the disconnect, don't worry about it.
-            # This avoids a race condition if we're mass-disconnecting peers.
-            if e.error['code'] != -29:  # RPC_CLIENT_NODE_NOT_CONNECTED
-                raise
-
-    # wait to disconnect
-    wait_until_helper(lambda: not get_peer_ids(), timeout=5)
-
-
-def connect_nodes(from_connection, node_num):
-    ip_port = "127.0.0.1:" + str(p2p_port(node_num))
-    from_connection.addnode(ip_port, "onetry")
-    # poll until version handshake complete to avoid race conditions
-    # with transaction relaying
-    # See comments in net_processing:
-    # * Must have a version message before anything else
-    # * Must have a verack message before anything else
-    wait_until_helper(lambda: all(peer['version'] != 0 for peer in from_connection.getpeerinfo()))
-    wait_until_helper(lambda: all(peer['bytesrecv_per_msg'].pop('verack', 0) == 24 for peer in from_connection.getpeerinfo()))
-
-
 # Transaction/Block functions
 #############################
 
@@ -467,62 +445,6 @@ def find_output(node, txid, amount, *, blockhash=None):
         if txdata["vout"][i]["value"] == amount:
             return i
     raise RuntimeError("find_output txid %s : %s not found" % (txid, str(amount)))
-
-
-def gather_inputs(from_node, amount_needed, confirmations_required=1):
-    """
-    Return a random set of unspent txouts that are enough to pay amount_needed
-    """
-    assert confirmations_required >= 0
-    utxo = from_node.listunspent(confirmations_required)
-    random.shuffle(utxo)
-    inputs = []
-    total_in = Decimal("0.00000000")
-    while total_in < amount_needed and len(utxo) > 0:
-        t = utxo.pop()
-        total_in += t["amount"]
-        inputs.append({"txid": t["txid"], "vout": t["vout"], "address": t["address"]})
-    if total_in < amount_needed:
-        raise RuntimeError("Insufficient funds: need %d, have %d" % (amount_needed, total_in))
-    return (total_in, inputs)
-
-
-def make_change(from_node, amount_in, amount_out, fee):
-    """
-    Create change output(s), return them
-    """
-    outputs = {}
-    amount = amount_out + fee
-    change = amount_in - amount
-    if change > amount * 2:
-        # Create an extra change output to break up big inputs
-        change_address = from_node.getnewaddress()
-        # Split change in two, being careful of rounding:
-        outputs[change_address] = Decimal(change / 2).quantize(Decimal('0.00000001'), rounding=ROUND_DOWN)
-        change = amount_in - amount - outputs[change_address]
-    if change > 0:
-        outputs[from_node.getnewaddress()] = change
-    return outputs
-
-
-def random_transaction(nodes, amount, min_fee, fee_increment, fee_variants):
-    """
-    Create a random transaction.
-    Returns (txid, hex-encoded-transaction-data, fee)
-    """
-    from_node = random.choice(nodes)
-    to_node = random.choice(nodes)
-    fee = min_fee + fee_increment * random.randint(0, fee_variants)
-
-    (total_in, inputs) = gather_inputs(from_node, amount + fee)
-    outputs = make_change(from_node, total_in, amount, fee)
-    outputs[to_node.getnewaddress()] = float(amount)
-
-    rawtx = from_node.createrawtransaction(inputs, outputs)
-    signresult = from_node.signrawtransactionwithwallet(rawtx)
-    txid = from_node.sendrawtransaction(signresult["hex"], 0)
-
-    return (txid, signresult["hex"], fee)
 
 
 # Helper to create at least "count" utxos
@@ -623,7 +545,7 @@ def find_vout_for_address(node, txid, addr):
     """
     tx = node.getrawtransaction(txid, True)
     for i in range(len(tx["vout"])):
-        if any([addr == a for a in tx["vout"][i]["scriptPubKey"]["addresses"]]):
+        if addr == tx["vout"][i]["scriptPubKey"]["address"]:
             return i
     raise RuntimeError("Vout not found for address: txid=%s, addr=%s" % (txid, addr))
 

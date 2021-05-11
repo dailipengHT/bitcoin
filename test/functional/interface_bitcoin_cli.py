@@ -29,6 +29,8 @@ class TestBitcoinCli(BitcoinTestFramework):
     def set_test_params(self):
         self.setup_clean_chain = True
         self.num_nodes = 1
+        if self.is_wallet_compiled():
+            self.requires_wallet = True
 
     def skip_test_if_missing_module(self):
         self.skip_if_no_cli()
@@ -95,7 +97,7 @@ class TestBitcoinCli(BitcoinTestFramework):
             assert_equal(self.nodes[0].cli.getwalletinfo(), wallet_info)
 
             # Setup to test -getinfo, -generate, and -rpcwallet= with multiple wallets.
-            wallets = ['', 'Encrypted', 'secret']
+            wallets = [self.default_wallet_name, 'Encrypted', 'secret']
             amounts = [BALANCE + Decimal('9.999928'), Decimal(9), Decimal(31)]
             self.nodes[0].createwallet(wallet_name=wallets[1])
             self.nodes[0].createwallet(wallet_name=wallets[2])
@@ -149,7 +151,7 @@ class TestBitcoinCli(BitcoinTestFramework):
             assert_equal(cli_get_info['balance'], amounts[1])
 
             self.log.info("Test -getinfo with -rpcwallet=unloaded wallet returns no balances")
-            cli_get_info = self.nodes[0].cli('-getinfo', rpcwallet3).send_cli()
+            cli_get_info_keys = self.nodes[0].cli('-getinfo', rpcwallet3).send_cli().keys()
             assert 'balance' not in cli_get_info_keys
             assert 'balances' not in cli_get_info_keys
 

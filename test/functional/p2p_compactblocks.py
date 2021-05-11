@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (c) 2016-2019 The Bitcoin Core developers
+# Copyright (c) 2016-2020 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test compact blocks (BIP 152).
@@ -9,7 +9,7 @@ Version 2 compact blocks are post-segwit (wtxids)
 """
 import random
 
-from test_framework.blocktools import create_block, create_coinbase, add_witness_commitment
+from test_framework.blocktools import create_block, NORMAL_GBT_REQUEST_PARAMS, add_witness_commitment
 from test_framework.messages import BlockTransactions, BlockTransactionsRequest, calculate_shortid, CBlock, CBlockHeader, CInv, COutPoint, CTransaction, CTxIn, CTxInWitness, CTxOut, FromHex, HeaderAndShortIDs, msg_no_witness_block, msg_no_witness_blocktxn, msg_cmpctblock, msg_getblocktxn, msg_getdata, msg_getheaders, msg_headers, msg_inv, msg_sendcmpct, msg_sendheaders, msg_tx, msg_block, msg_blocktxn, MSG_BLOCK, MSG_CMPCT_BLOCK, MSG_WITNESS_FLAG, NODE_NETWORK, P2PHeaderAndShortIDs, PrefilledTransaction, ser_uint256, ToHex
 from test_framework.p2p import p2p_lock, P2PInterface
 from test_framework.script import CScript, OP_TRUE, OP_DROP
@@ -104,11 +104,7 @@ class CompactBlocksTest(BitcoinTestFramework):
         self.skip_if_no_wallet()
 
     def build_block_on_tip(self, node, segwit=False):
-        height = node.getblockcount()
-        tip = node.getbestblockhash()
-        mtp = node.getblockheader(tip)['mediantime']
-        block = create_block(int(tip, 16), create_coinbase(height + 1), mtp + 1)
-        block.nVersion = 4
+        block = create_block(tmpl=node.getblocktemplate(NORMAL_GBT_REQUEST_PARAMS))
         if segwit:
             add_witness_commitment(block)
         block.solve()
@@ -188,28 +184,21 @@ class CompactBlocksTest(BitcoinTestFramework):
         test_node.request_headers_and_sync(locator=[tip])
 
         # Now try a SENDCMPCT message with too-high version
-        sendcmpct = msg_sendcmpct()
-        sendcmpct.version = preferred_version + 1
-        sendcmpct.announce = True
-        test_node.send_and_ping(sendcmpct)
+        test_node.send_and_ping(msg_sendcmpct(announce=True, version=preferred_version+1))
         check_announcement_of_new_block(node, test_node, lambda p: "cmpctblock" not in p.last_message)
 
         # Headers sync before next test.
         test_node.request_headers_and_sync(locator=[tip])
 
         # Now try a SENDCMPCT message with valid version, but announce=False
-        sendcmpct.version = preferred_version
-        sendcmpct.announce = False
-        test_node.send_and_ping(sendcmpct)
+        test_node.send_and_ping(msg_sendcmpct(announce=False, version=preferred_version))
         check_announcement_of_new_block(node, test_node, lambda p: "cmpctblock" not in p.last_message)
 
         # Headers sync before next test.
         test_node.request_headers_and_sync(locator=[tip])
 
         # Finally, try a SENDCMPCT message with announce=True
-        sendcmpct.version = preferred_version
-        sendcmpct.announce = True
-        test_node.send_and_ping(sendcmpct)
+        test_node.send_and_ping(msg_sendcmpct(announce=True, version=preferred_version))
         check_announcement_of_new_block(node, test_node, lambda p: "cmpctblock" in p.last_message)
 
         # Try one more time (no headers sync should be needed!)
@@ -220,23 +209,17 @@ class CompactBlocksTest(BitcoinTestFramework):
         check_announcement_of_new_block(node, test_node, lambda p: "cmpctblock" in p.last_message)
 
         # Try one more time, after sending a version-1, announce=false message.
-        sendcmpct.version = preferred_version - 1
-        sendcmpct.announce = False
-        test_node.send_and_ping(sendcmpct)
+        test_node.send_and_ping(msg_sendcmpct(announce=False, version=preferred_version-1))
         check_announcement_of_new_block(node, test_node, lambda p: "cmpctblock" in p.last_message)
 
         # Now turn off announcements
-        sendcmpct.version = preferred_version
-        sendcmpct.announce = False
-        test_node.send_and_ping(sendcmpct)
+        test_node.send_and_ping(msg_sendcmpct(announce=False, version=preferred_version))
         check_announcement_of_new_block(node, test_node, lambda p: "cmpctblock" not in p.last_message and "headers" in p.last_message)
 
         if old_node is not None:
             # Verify that a peer using an older protocol version can receive
             # announcements from this node.
-            sendcmpct.version = preferred_version - 1
-            sendcmpct.announce = True
-            old_node.send_and_ping(sendcmpct)
+            old_node.send_and_ping(msg_sendcmpct(announce=True, version=preferred_version-1))
             # Header sync
             old_node.request_headers_and_sync(locator=[tip])
             check_announcement_of_new_block(node, old_node, lambda p: "cmpctblock" in p.last_message)
@@ -729,11 +712,7 @@ class CompactBlocksTest(BitcoinTestFramework):
         node = self.nodes[0]
         tip = node.getbestblockhash()
         peer.get_headers(locator=[int(tip, 16)], hashstop=0)
-
-        msg = msg_sendcmpct()
-        msg.version = peer.cmpct_version
-        msg.announce = True
-        peer.send_and_ping(msg)
+        peer.send_and_ping(msg_sendcmpct(announce=True, version=peer.cmpct_version))
 
     def test_compactblock_reconstruction_multiple_peers(self, stalling_peer, delivery_peer):
         node = self.nodes[0]
@@ -785,7 +764,38 @@ class CompactBlocksTest(BitcoinTestFramework):
         stalling_peer.send_and_ping(msg)
         assert_equal(int(node.getbestblockhash(), 16), block.sha256)
 
+    def test_highbandwidth_mode_states_via_getpeerinfo(self):
+        # create new p2p connection for a fresh state w/o any prior sendcmpct messages sent
+        hb_test_node = self.nodes[0].add_p2p_connection(TestP2PConn(cmpct_version=2))
+
+        # assert the RPC getpeerinfo boolean fields `bip152_hb_{to, from}`
+        # match the given parameters for the last peer of a given node
+        def assert_highbandwidth_states(node, hb_to, hb_from):
+            peerinfo = node.getpeerinfo()[-1]
+            assert_equal(peerinfo['bip152_hb_to'], hb_to)
+            assert_equal(peerinfo['bip152_hb_from'], hb_from)
+
+        # initially, neither node has selected the other peer as high-bandwidth yet
+        assert_highbandwidth_states(self.nodes[0], hb_to=False, hb_from=False)
+
+        # peer requests high-bandwidth mode by sending sendcmpct(1)
+        hb_test_node.send_and_ping(msg_sendcmpct(announce=True, version=2))
+        assert_highbandwidth_states(self.nodes[0], hb_to=False, hb_from=True)
+
+        # peer generates a block and sends it to node, which should
+        # select the peer as high-bandwidth (up to 3 peers according to BIP 152)
+        block = self.build_block_on_tip(self.nodes[0])
+        hb_test_node.send_and_ping(msg_block(block))
+        assert_highbandwidth_states(self.nodes[0], hb_to=True, hb_from=True)
+
+        # peer requests low-bandwidth mode by sending sendcmpct(0)
+        hb_test_node.send_and_ping(msg_sendcmpct(announce=False, version=2))
+        assert_highbandwidth_states(self.nodes[0], hb_to=True, hb_from=False)
+
     def run_test(self):
+        # Get the nodes out of IBD
+        self.nodes[0].generate(1)
+
         # Setup the p2p connections
         self.segwit_node = self.nodes[0].add_p2p_connection(TestP2PConn(cmpct_version=2))
         self.old_node = self.nodes[0].add_p2p_connection(TestP2PConn(cmpct_version=1), services=NODE_NETWORK)
@@ -839,6 +849,9 @@ class CompactBlocksTest(BitcoinTestFramework):
 
         self.log.info("Testing invalid index in cmpctblock message...")
         self.test_invalid_cmpctblock_message()
+
+        self.log.info("Testing high-bandwidth mode states via getpeerinfo...")
+        self.test_highbandwidth_mode_states_via_getpeerinfo()
 
 
 if __name__ == '__main__':

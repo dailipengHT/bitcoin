@@ -1,11 +1,10 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2009-2019 The Bitcoin Core developers
+// Copyright (c) 2009-2020 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <protocol.h>
 
-#include <util/strencodings.h>
 #include <util/system.h>
 
 static std::atomic<bool> g_initial_block_download_completed(false);
@@ -14,6 +13,8 @@ namespace NetMsgType {
 const char *VERSION="version";
 const char *VERACK="verack";
 const char *ADDR="addr";
+const char *ADDRV2="addrv2";
+const char *SENDADDRV2="sendaddrv2";
 const char *INV="inv";
 const char *GETDATA="getdata";
 const char *MERKLEBLOCK="merkleblock";
@@ -52,6 +53,8 @@ const static std::string allNetMessageTypes[] = {
     NetMsgType::VERSION,
     NetMsgType::VERACK,
     NetMsgType::ADDR,
+    NetMsgType::ADDRV2,
+    NetMsgType::SENDADDRV2,
     NetMsgType::INV,
     NetMsgType::GETDATA,
     NetMsgType::MERKLEBLOCK,
@@ -82,11 +85,11 @@ const static std::string allNetMessageTypes[] = {
     NetMsgType::CFCHECKPT,
     NetMsgType::WTXIDRELAY,
 };
-const static std::vector<std::string> allNetMessageTypesVec(allNetMessageTypes, allNetMessageTypes+ARRAYLEN(allNetMessageTypes));
+const static std::vector<std::string> allNetMessageTypesVec(std::begin(allNetMessageTypes), std::end(allNetMessageTypes));
 
-CMessageHeader::CMessageHeader(const MessageStartChars& pchMessageStartIn)
+CMessageHeader::CMessageHeader()
 {
-    memcpy(pchMessageStart, pchMessageStartIn, MESSAGE_START_SIZE);
+    memset(pchMessageStart, 0, MESSAGE_START_SIZE);
     memset(pchCommand, 0, sizeof(pchCommand));
     nMessageSize = -1;
     memset(pchChecksum, 0, CHECKSUM_SIZE);
@@ -111,31 +114,20 @@ std::string CMessageHeader::GetCommand() const
     return std::string(pchCommand, pchCommand + strnlen(pchCommand, COMMAND_SIZE));
 }
 
-bool CMessageHeader::IsValid(const MessageStartChars& pchMessageStartIn) const
+bool CMessageHeader::IsCommandValid() const
 {
-    // Check start string
-    if (memcmp(pchMessageStart, pchMessageStartIn, MESSAGE_START_SIZE) != 0)
-        return false;
-
     // Check the command string for errors
-    for (const char* p1 = pchCommand; p1 < pchCommand + COMMAND_SIZE; p1++)
-    {
-        if (*p1 == 0)
-        {
+    for (const char* p1 = pchCommand; p1 < pchCommand + COMMAND_SIZE; ++p1) {
+        if (*p1 == 0) {
             // Must be all zeros after the first zero
-            for (; p1 < pchCommand + COMMAND_SIZE; p1++)
-                if (*p1 != 0)
+            for (; p1 < pchCommand + COMMAND_SIZE; ++p1) {
+                if (*p1 != 0) {
                     return false;
-        }
-        else if (*p1 < ' ' || *p1 > 0x7E)
+                }
+            }
+        } else if (*p1 < ' ' || *p1 > 0x7E) {
             return false;
-    }
-
-    // Message size
-    if (nMessageSize > MAX_SIZE)
-    {
-        LogPrintf("CMessageHeader::IsValid(): (%s, %u bytes) nMessageSize > MAX_SIZE\n", GetCommand(), nMessageSize);
-        return false;
+        }
     }
 
     return true;
@@ -210,7 +202,6 @@ static std::string serviceFlagToStr(size_t bit)
     switch ((ServiceFlags)service_flag) {
     case NODE_NONE: abort();  // impossible
     case NODE_NETWORK:         return "NETWORK";
-    case NODE_GETUTXO:         return "GETUTXO";
     case NODE_BLOOM:           return "BLOOM";
     case NODE_WITNESS:         return "WITNESS";
     case NODE_COMPACT_FILTERS: return "COMPACT_FILTERS";

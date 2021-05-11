@@ -1,5 +1,5 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2009-2019 The Bitcoin Core developers
+// Copyright (c) 2009-2020 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -37,7 +37,7 @@ public:
     static constexpr size_t HEADER_SIZE = MESSAGE_START_SIZE + COMMAND_SIZE + MESSAGE_SIZE_SIZE + CHECKSUM_SIZE;
     typedef unsigned char MessageStartChars[MESSAGE_START_SIZE];
 
-    explicit CMessageHeader(const MessageStartChars& pchMessageStartIn);
+    explicit CMessageHeader();
 
     /** Construct a P2P message header from message-start characters, a command and the size of the message.
      * @note Passing in a `pszCommand` longer than COMMAND_SIZE will result in a run-time assertion error.
@@ -45,7 +45,7 @@ public:
     CMessageHeader(const MessageStartChars& pchMessageStartIn, const char* pszCommand, unsigned int nMessageSizeIn);
 
     std::string GetCommand() const;
-    bool IsValid(const MessageStartChars& messageStart) const;
+    bool IsCommandValid() const;
 
     SERIALIZE_METHODS(CMessageHeader, obj) { READWRITE(obj.pchMessageStart, obj.pchCommand, obj.nMessageSize, obj.pchChecksum); }
 
@@ -76,6 +76,18 @@ extern const char* VERACK;
  * network.
  */
 extern const char* ADDR;
+/**
+ * The addrv2 message relays connection information for peers on the network just
+ * like the addr message, but is extended to allow gossiping of longer node
+ * addresses (see BIP155).
+ */
+extern const char *ADDRV2;
+/**
+ * The sendaddrv2 message signals support for receiving ADDRV2 messages (BIP155).
+ * It also implies that its sender can encode as ADDRV2 and would send ADDRV2
+ * instead of ADDR to a peer that has signaled ADDRV2 support by sending SENDADDRV2.
+ */
+extern const char *SENDADDRV2;
 /**
  * The inv message (inventory message) transmits one or more inventories of
  * objects known to the transmitting peer.
@@ -261,10 +273,6 @@ enum ServiceFlags : uint64_t {
     // NODE_NETWORK means that the node is capable of serving the complete block chain. It is currently
     // set by all Bitcoin Core non pruned nodes, and is unset by SPV clients or other light clients.
     NODE_NETWORK = (1 << 0),
-    // NODE_GETUTXO means the node is capable of responding to the getutxo protocol request.
-    // Bitcoin Core does not support this but a patch set called Bitcoin XT does.
-    // See BIP 64 for details on how this is implemented.
-    NODE_GETUTXO = (1 << 1),
     // NODE_BLOOM means the node is capable and willing to handle bloom-filtered connections.
     // Bitcoin Core nodes used to support this by default, without advertising this bit,
     // but no longer do as of protocol version 70011 (= NO_BLOOM_VERSION)
@@ -351,7 +359,8 @@ class CAddress : public CService
 
 public:
     CAddress() : CService{} {};
-    explicit CAddress(CService ipIn, ServiceFlags nServicesIn) : CService{ipIn}, nServices{nServicesIn} {};
+    CAddress(CService ipIn, ServiceFlags nServicesIn) : CService{ipIn}, nServices{nServicesIn} {};
+    CAddress(CService ipIn, ServiceFlags nServicesIn, uint32_t nTimeIn) : CService{ipIn}, nTime{nTimeIn}, nServices{nServicesIn} {};
 
     SERIALIZE_METHODS(CAddress, obj)
     {
@@ -370,7 +379,14 @@ public:
             // nTime.
             READWRITE(obj.nTime);
         }
-        READWRITE(Using<CustomUintFormatter<8>>(obj.nServices));
+        if (nVersion & ADDRV2_FORMAT) {
+            uint64_t services_tmp;
+            SER_WRITE(obj, services_tmp = obj.nServices);
+            READWRITE(Using<CompactSizeFormatter<false>>(services_tmp));
+            SER_READ(obj, obj.nServices = static_cast<ServiceFlags>(services_tmp));
+        } else {
+            READWRITE(Using<CustomUintFormatter<8>>(obj.nServices));
+        }
         READWRITEAS(CService, obj);
     }
 

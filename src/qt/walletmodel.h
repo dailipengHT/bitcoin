@@ -105,7 +105,7 @@ public:
     SendCoinsReturn sendCoins(WalletModelTransaction &transaction);
 
     // Wallet encryption
-    bool setWalletEncrypted(bool encrypted, const SecureString &passphrase);
+    bool setWalletEncrypted(const SecureString& passphrase);
     // Passphrase only needed when unlocking
     bool setWalletLocked(bool locked, const SecureString &passPhrase=SecureString());
     bool changePassphrase(const SecureString &oldPass, const SecureString &newPass);
@@ -222,6 +222,8 @@ Q_SIGNALS:
 
     // Notify that there are now keys in the keypool
     void canGetAddressesChanged();
+
+    void timerTimeout();
 
 public Q_SLOTS:
     /* Starts a timer to periodically update the balance */

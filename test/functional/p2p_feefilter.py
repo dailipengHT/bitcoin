@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (c) 2016-2019 The Bitcoin Core developers
+# Copyright (c) 2016-2020 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test processing of feefilter messages."""
@@ -61,6 +61,7 @@ class FeeFilterTest(BitcoinTestFramework):
     def run_test(self):
         self.test_feefilter_forcerelay()
         self.test_feefilter()
+        self.test_feefilter_blocksonly()
 
     def test_feefilter_forcerelay(self):
         self.log.info('Check that peers without forcerelay permission (default) get a feefilter message')
@@ -108,15 +109,29 @@ class FeeFilterTest(BitcoinTestFramework):
         # to 35 entries in an inv, which means that when this next transaction
         # is eligible for relay, the prior transactions from node1 are eligible
         # as well.
-        txids = [miniwallet.send_self_transfer(fee_rate=Decimal('0.00020000'), from_node=node0)['wtxid'] for _ in range(3)]
+        txids = [miniwallet.send_self_transfer(fee_rate=Decimal('0.00020000'), from_node=node0)['wtxid'] for _ in range(1)]
         conn.wait_for_invs_to_match(txids)
         conn.clear_invs()
+        self.sync_mempools()  # must be sure node 1 has received all txs
 
         self.log.info("Remove fee filter and check txs are received again")
         conn.send_and_ping(msg_feefilter(0))
         txids = [miniwallet.send_self_transfer(fee_rate=Decimal('0.00020000'), from_node=node1)['wtxid'] for _ in range(3)]
         conn.wait_for_invs_to_match(txids)
         conn.clear_invs()
+
+    def test_feefilter_blocksonly(self):
+        """Test that we don't send fee filters to block-relay-only peers and when we're in blocksonly mode."""
+        self.log.info("Check that we don't send fee filters to block-relay-only peers.")
+        feefilter_peer = self.nodes[0].add_outbound_p2p_connection(FeefilterConn(), p2p_idx=0, connection_type="block-relay-only")
+        feefilter_peer.sync_with_ping()
+        feefilter_peer.assert_feefilter_received(False)
+
+        self.log.info("Check that we don't send fee filters when in blocksonly mode.")
+        self.restart_node(0, ["-blocksonly"])
+        feefilter_peer = self.nodes[0].add_p2p_connection(FeefilterConn())
+        feefilter_peer.sync_with_ping()
+        feefilter_peer.assert_feefilter_received(False)
 
 
 if __name__ == '__main__':
